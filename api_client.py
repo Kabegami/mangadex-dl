@@ -24,7 +24,7 @@ class ApiClient(object):
         # don't re-use the same connections because the server can close the connection before we are done wiht it
         # since we are limited on the number of request this shoudln't be an issue for performances
         connector = TCPConnector(force_close=True)
-        timeout = ClientTimeout(total=60*60)
+        timeout = ClientTimeout(total=60 * 60)
         self.session = DomainRateLimiter(ClientSession(connector=connector, timeout=timeout))
         self.output_dir = Path(output_dir)
         self.to_cbz = to_cbz
@@ -61,27 +61,47 @@ class ApiClient(object):
 
     @safe
     async def get_chapters(self) -> Optional[Iterable[tuple[int, str]]]:
-        #TODO : handle bulk mode when there is more than 500 chapters
         url = Urls.MANGA + f"/{self.uuid}/feed"
         logging.debug(f"get_chapters : {url}")
-        params = f"?translatedLanguage[]={self.language}"
+        params = f"?translatedLanguage[]={self.language}&limit=0"
         url += params
         async with await self.session.get(url) as response:
             if response.status != 200:
                 logging.error(f"Failed to retrieved chapter with url {url} and status : {response.status}")
                 return None
             data = await response.json()
+            total = data["total"]
+            offset = 0
             result = []
-            for infos in data["data"]:
-                if infos["type"] != "chapter":
-                    continue
-                # apparently the chapter can also be a range instead of an int
-                chapter = infos["attributes"]["chapter"]
-                chapter = standard_chapter_number(chapter)
-                chapter_uid = infos["id"]
-                if int(infos["attributes"]["pages"]) != 0:
-                    result.append((chapter, chapter_uid))
+            while offset < total:
+                bulk = await self._get_chapter_bulk(offset)
+                result += bulk
+                offset += 500
+
             return result
+
+    @staticmethod
+    def _extract_chapter_info(data):
+        result = []
+        for infos in data["data"]:
+            if infos["type"] != "chapter":
+                continue
+            chapter = infos["attributes"]["chapter"]
+            chapter = standard_chapter_number(chapter)
+            chapter_uid = infos["id"]
+            if int(infos["attributes"]["pages"]) != 0:
+                result.append((chapter, chapter_uid))
+        return result
+
+    async def _get_chapter_bulk(self, offset):
+        url = f"{Urls.MANGA}/{self.uuid}/feed?order[chapter]=asc&order[volume]=asc&limit=500" \
+              f"&translatedLanguage[]={self.language}&offset={offset}"
+        async with await self.session.get(url) as response:
+            if response.status != 200:
+                logging.error(f"failed to get chapter bulk with url {url}")
+                return None
+            data = await response.json()
+            return ApiClient._extract_chapter_info(data)
 
     async def dowload_manga(self):
         title = await self.get_title()
