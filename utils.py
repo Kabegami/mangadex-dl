@@ -14,17 +14,6 @@ def safe(fn):
     return helper
 
 
-def standard_chapter_number(chapter: str) -> str:
-    """ return the chapter number with 3 digit to respect cbz convention: 3 -> 003"""
-    number = float(chapter)
-    is_float = number != number // 1
-    if not is_float:
-        return chapter.zfill(3)
-    int_part = str(int(number // 1)).zfill(3)
-    float_part = chapter.split(".")[1]
-    return f"{int_part}.{float_part}"
-
-
 """
 def safe(fn):
     def helper(*args, **kwargs):
@@ -37,6 +26,17 @@ def safe(fn):
 """
 
 
+def standard_chapter_number(chapter: str) -> str:
+    """ return the chapter number with 3 digit to respect cbz convention: 3 -> 003"""
+    number = float(chapter)
+    is_float = number != number // 1
+    if not is_float:
+        return chapter.zfill(3)
+    int_part = str(int(number // 1)).zfill(3)
+    float_part = chapter.split(".")[1]
+    return f"{int_part}.{float_part}"
+
+
 class DomainRateLimiter:
     default_rate = 5
     default_max_token = 5
@@ -46,7 +46,7 @@ class DomainRateLimiter:
         self.tokens = defaultdict(lambda: self.default_max_token)
         self.max_tokens = defaultdict(lambda: self.default_max_token)
         self.retry_after = defaultdict(lambda: -1)
-        self.updated_at = defaultdict(lambda : time.monotonic())
+        self.updated_at = defaultdict(lambda: time.monotonic())
         self.rates = defaultdict(lambda: self.default_rate)
 
     def register_limit(self, url, headers):
@@ -54,7 +54,7 @@ class DomainRateLimiter:
 
         if self.max_tokens[domain] != self.default_max_token:
             return
-        
+
         limit = headers.get('x-ratelimit-limit')
         if limit is not None:
             limit = int(headers['x-ratelimit-limit'])
@@ -97,35 +97,81 @@ class DomainRateLimiter:
             self.updated_at[domain] = now
 
 
-class RateLimiter:
-    RATE = 5
-    MAX_TOKEN = 5
+class InvalidChapterSelectionException(Exception):
+    def __init__(self, *args, **kwargs):
+        super.__init__(*args, **kwargs)
 
-    def __init__(self, client):
-        self.client = client
-        self.tokens = self.MAX_TOKEN
-        self.updated_at = time.monotonic()
+    @classmethod
+    def missing_dash(cls, data):
+        return cls(f"the input {data} is not a valid range since it doesn't contain a -")
 
-    async def close(self):
-        await self.client.close()
+    @classmethod
+    def to_many_dashes(cls, data):
+        return cls(f"the input {data} is not a valid range since it doesn't contain more than 2 parts")
 
-    async def get(self, *args, **kwargs):
-        logging.debug(f"get : {','.join(args)}")
-        await self.wait_for_token()
-        return self.client.get(*args, **kwargs)
+    @classmethod
+    def not_a_number_or_range(cls, data):
+        return cls(f"the input {data} is neither a number or a range")
 
-    async def wait_for_token(self):
 
-        while self.tokens <= 1:
-            now = time.monotonic()
-            await self.add_new_tokens()
-            await asyncio.sleep(1)
-        self.tokens -= 1
+class ChapterSelection:
+    """ We select chapters with 2 means :
+    specified chapter : where we give specific number of chapter to fetch
+    range : in the form of start-end, if one part is missing it consider to have no bound on this side
+    for example 12- take all the capter with a number > 12
+    """
 
-    async def add_new_tokens(self):
-        now = time.monotonic()
-        elapsed = now - self.updated_at
-        new_tokens = elapsed * self.RATE
-        if self.tokens + new_tokens >= 1:
-            self.tokens = min(self.tokens + new_tokens, self.MAX_TOKEN)
-            self.updated_at = now
+    def __init__(self):
+        self.specified = []
+        self.ranges = []
+        self.accept_all = False
+
+    def add(self, number):
+        self.specified.append(float(number))
+
+    def add_range(self, interval: str):
+        if "-" not in interval:
+            raise InvalidChapterSelectionException.missing_dash(interval)
+
+        parts = [x for x in interval.split("-") if x]
+        if len(parts) == 2:
+            start, end = parts
+            self.ranges.append((float(start), float(end)))
+        elif len(parts) == 1:
+            bound = float(parts[0])
+            missing_start = interval[0] == "-"
+            if missing_start:
+                self.ranges.append((-float("inf"), bound))
+            else:
+                self.ranges.append((bound, float("inf")))
+        else:
+            raise InvalidChapterSelectionException.to_many_dashes(interval)
+
+    def __contains__(self, item):
+        chapter = float(item)
+        if chapter in self.specified:
+            return True
+        for interval in self.ranges:
+            start, end = interval
+            if start <= chapter <= end:
+                return True
+        return False
+
+    @classmethod
+    def all(cls):
+        result = cls()
+        result.accept_all = True
+
+    @classmethod
+    def parse(cls, selection: str):
+        """selection should be a list of chapter number or range (ex : 13-20) separated by comma"""
+        result = cls()
+        elements = selection.split(",")
+        for element in elements:
+            if "-" in element:
+                result.add_range(element)
+            elif element.isnumeric():
+                result.add(element)
+            else:
+                raise InvalidChapterSelectionException.not_a_number_or_range(element)
+        return result

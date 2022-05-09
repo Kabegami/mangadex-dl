@@ -4,7 +4,7 @@ import shutil
 
 from typing import Optional, Dict, List, Iterable
 from aiohttp import ClientSession, TCPConnector, ClientPayloadError, ClientTimeout
-from utils import safe, RateLimiter, standard_chapter_number, DomainRateLimiter
+from utils import safe, standard_chapter_number, DomainRateLimiter
 from pathlib import Path
 from zipfile import ZipFile, ZIP_STORED
 
@@ -18,7 +18,7 @@ class Urls:
 class ApiClient(object):
     quality = "data"
 
-    def __init__(self, uuid, language, output_dir, to_cbz=False):
+    def __init__(self, uuid, language, output_dir, chapter_selection,  to_cbz=False):
         self.uuid = uuid
         self.language = language
         # don't re-use the same connections because the server can close the connection before we are done wiht it
@@ -28,6 +28,7 @@ class ApiClient(object):
         self.session = DomainRateLimiter(ClientSession(connector=connector, timeout=timeout))
         self.output_dir = Path(output_dir)
         self.to_cbz = to_cbz
+        self.chapter_selection = chapter_selection
 
     async def close(self):
         await self.session.close()
@@ -80,8 +81,7 @@ class ApiClient(object):
 
             return result
 
-    @staticmethod
-    def _extract_chapter_info(data):
+    def _extract_chapter_info(self, data):
         result = []
         for infos in data["data"]:
             if infos["type"] != "chapter":
@@ -89,7 +89,7 @@ class ApiClient(object):
             chapter = infos["attributes"]["chapter"]
             chapter = standard_chapter_number(chapter)
             chapter_uid = infos["id"]
-            if int(infos["attributes"]["pages"]) != 0:
+            if int(infos["attributes"]["pages"]) != 0 and chapter in self.chapter_selection:
                 result.append((chapter, chapter_uid))
         return result
 
@@ -101,7 +101,7 @@ class ApiClient(object):
                 logging.error(f"failed to get chapter bulk with url {url}")
                 return None
             data = await response.json()
-            return ApiClient._extract_chapter_info(data)
+            return self._extract_chapter_info(data)
 
     async def dowload_manga(self):
         title = await self.get_title()
