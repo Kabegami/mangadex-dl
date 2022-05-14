@@ -4,7 +4,7 @@ import shutil
 
 from typing import Optional, Dict, List, Iterable
 from aiohttp import ClientSession, TCPConnector, ClientPayloadError, ClientTimeout
-from utils import safe, standard_chapter_number, DomainRateLimiter
+from utils import standard_chapter_number, DomainRateLimiter
 from pathlib import Path
 from zipfile import ZipFile, ZIP_STORED
 
@@ -18,22 +18,19 @@ class Urls:
 class ApiClient(object):
     quality = "data"
 
-    def __init__(self, uuid, language, output_dir, chapter_selection,  to_cbz=False):
+    def __init__(self, uuid, chapter_selection, configuration):
         self.uuid = uuid
-        self.language = language
+        self.configuration = configuration
         # don't re-use the same connections because the server can close the connection before we are done wiht it
         # since we are limited on the number of request this shoudln't be an issue for performances
         connector = TCPConnector(force_close=True)
         timeout = ClientTimeout(total=60 * 60)
         self.session = DomainRateLimiter(ClientSession(connector=connector, timeout=timeout))
-        self.output_dir = Path(output_dir)
-        self.to_cbz = to_cbz
         self.chapter_selection = chapter_selection
 
     async def close(self):
         await self.session.close()
 
-    @safe
     async def get_title(self) -> Optional[str]:
         url = Urls.MANGA + "/" + self.uuid
         logging.debug(f"get_title : {url}")
@@ -43,7 +40,7 @@ class ApiClient(object):
                 return title
             try:
                 data = await response.json()
-                title = data["data"]["attributes"]["title"][self.language]
+                title = data["data"]["attributes"]["title"]["en"]
             except KeyError:  # if no manga title in requested dl language
                 try:
                     # lookup in altTitles
@@ -51,7 +48,7 @@ class ApiClient(object):
                     titles = data["data"]["attributes"]["altTitles"]
                     for val in titles:
                         alt_titles.update(val)
-                    title = alt_titles[self.language]
+                    title = alt_titles["en"]
                 except:
                     # fallback to English title
                     try:
@@ -60,11 +57,11 @@ class ApiClient(object):
                         logging.error(f"Couldn't retrieve manga title : {ex}")
             return title
 
-    @safe
     async def get_chapters(self) -> Optional[Iterable[tuple[int, str]]]:
         url = Urls.MANGA + f"/{self.uuid}/feed"
         logging.debug(f"get_chapters : {url}")
-        params = f"?translatedLanguage[]={self.language}&limit=0"
+        languages = "&".join([f"translatedLanguage[]={language}" for language in self.configuration.languages])
+        params = f"?{languages}&limit=0"
         url += params
         async with await self.session.get(url) as response:
             if response.status != 200:
@@ -94,8 +91,9 @@ class ApiClient(object):
         return result
 
     async def _get_chapter_bulk(self, offset):
+        languages = "&".join([f"translatedLanguage[]={language}" for language in self.configuration.languages])
         url = f"{Urls.MANGA}/{self.uuid}/feed?order[chapter]=asc&order[volume]=asc&limit=500" \
-              f"&translatedLanguage[]={self.language}&offset={offset}"
+              f"&{languages}&offset={offset}"
         async with await self.session.get(url) as response:
             if response.status != 200:
                 logging.error(f"failed to get chapter bulk with url {url}")
@@ -105,7 +103,7 @@ class ApiClient(object):
 
     async def dowload_manga(self):
         title = await self.get_title()
-        manga_dir = self.output_dir / title
+        manga_dir = self.configuration.output_path / title
         manga_dir.mkdir(exist_ok=True)
         chapters = await self.get_chapters()
         if chapters is None:
@@ -114,24 +112,27 @@ class ApiClient(object):
             *[self.download_chapter(uuid, manga_dir / f"{chapter}_{title}") for (chapter, uuid) in chapters])
 
     async def download_chapter(self, chapter_uuid: str, chapter_folder):
-        if chapter_folder.exists():
-            # handle duplicates
-            chapter_folder = chapter_folder.parent / (chapter_folder.name + "_1")
-        chapter_folder.mkdir(exist_ok=True)
-        destination = chapter_folder.name
         urls = await self.get_page_infos(chapter_uuid)
         if urls is None:
             return None
+        if chapter_folder.exists():
+            if self.configuration.download_duplicates:
+                chapter_folder = chapter_folder.parent / (chapter_folder.name + "_1")
+            else:
+                logging.info(f"Chapter : {str(chapter_folder)} already exists ignoring it !")
+                return
+
+        chapter_folder.mkdir(exist_ok=True)
+        destination = chapter_folder.name
 
         await self.bulk_download(urls, chapter_folder)
-        if self.to_cbz:
+        if self.configuration.is_cbz:
             filename = chapter_folder.parent / f"{destination}.cbz"
             with ZipFile(filename, "w", ZIP_STORED) as cbz_file:
                 for file in chapter_folder.glob("*"):
                     cbz_file.write(file, file)
             shutil.rmtree(chapter_folder)
 
-    @safe
     async def get_page_infos(self, chapter_uuid: str, nb_retry=3) -> Optional[Iterable[str]]:
         if nb_retry <= 0:
             return None

@@ -1,29 +1,40 @@
 import asyncio
 import time
 import logging
-import urllib
+import sys
+import subprocess, os, platform
 
 from urllib.parse import urlparse
 from collections import defaultdict
+from pathlib import Path
 
 
-def safe(fn):
-    def helper(*args, **kwargs):
-        return fn(*args, **kwargs)
+def get_datadir() -> Path:
+    """
+    Returns a parent directory path
+    where persistent application data can be stored.
 
-    return helper
+    # linux: ~/.local/share
+    # macOS: ~/Library/Application Support
+    # windows: C:/Users/<USER>/AppData/Roaming
+    """
+    home = Path.home()
+    if sys.platform == "win32":
+        return home / "AppData/Roaming"
+    elif sys.platform == "linux":
+        return home / ".local/share"
+    elif sys.platform == "darwin":
+        return home / "Library/Application Support"
 
 
-"""
-def safe(fn):
-    def helper(*args, **kwargs):
-    try:
-        return fn(*args, **kwargs)
-    except Exception as ex:
-        logging.error(f"{fn.__name__} : {ex}")
-        return None
-    return helper
-"""
+def open_with_default_application(filepath):
+    if platform.system() == 'Darwin':  # macOS
+        subprocess.call(('open', filepath))
+    elif platform.system() == 'Windows':  # Windows
+        os.startfile(filepath)
+    else:  # linux variants
+        editor = os.environ["EDITOR"]
+        subprocess.call((editor, filepath))
 
 
 def standard_chapter_number(chapter: str) -> str:
@@ -148,6 +159,8 @@ class ChapterSelection:
             raise InvalidChapterSelectionException.to_many_dashes(interval)
 
     def __contains__(self, item):
+        if self.accept_all:
+            return True
         chapter = float(item)
         if chapter in self.specified:
             return True
@@ -161,6 +174,7 @@ class ChapterSelection:
     def all(cls):
         result = cls()
         result.accept_all = True
+        return result
 
     @classmethod
     def parse(cls, selection: str):
